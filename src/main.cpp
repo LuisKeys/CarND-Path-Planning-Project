@@ -18,8 +18,11 @@ using json = nlohmann::json;
 // System State
 struct system_state {
 
+  double target_x = 30.0;
+  double initial_spline_points_spacing = 30.0;
   int total_path_points = 50;
-  int lane = 2; // car starts at slowest lane, most left lane is 0, total number of lanes is 3
+  double cycle_period = 0.02; // car starts at slowest lane, most left lane is 0, total number of lanes is 3
+  int lane = 1; // car starts at slowest lane, most left lane is 0, total number of lanes is 3
   double lane_size = 4.0; // lane width
   double top_velocity = 50.0; // m/h (Top velocity is 50 m/h)
   double reference_velocity = 49.5; // m/h 
@@ -29,10 +32,13 @@ struct system_state {
   double next_y = 0.0; // next x point for car position
 
   // Car will be referenced from started point or from the last point of previous path
+  double car_x = 0.0; // reference x car position
+  double car_y = 0.0; // reference y car position
+  double car_yaw = 0.0; // reference car angle
+  double car_s = 0.0; // reference s car position
   double ref_x = 0.0; // reference x car position
   double ref_y = 0.0; // reference y car position
   double ref_yaw = 0.0; // reference car angle
-  double ref_s = 0.0; // reference s car position
 
   // Map data
   vector<double> map_waypoints_s;
@@ -87,6 +93,7 @@ double distance(double x1, double y1, double x2, double y2)
 {
 	return sqrt((x2-x1)*(x2-x1)+(y2-y1)*(y2-y1));
 }
+
 int ClosestWaypoint(double x, double y, const vector<double> &maps_x, const vector<double> &maps_y)
 {
 
@@ -212,7 +219,36 @@ vector<double> getXY(double s, double d, const vector<double> &maps_s, const vec
 
 }
 
+// Transform a point to local car coords
+vector<double>  trasnform_to_car_coords(double x, double y) {
+  vector<double> transformed_point;
+  double shift_x = x - _ppss.ref_x;
+  double shift_y = y - _ppss.ref_y;
+
+  transformed_point.push_back( shift_x * cos(-_ppss.ref_yaw) - shift_y * sin(-_ppss.ref_yaw) );
+  transformed_point.push_back( shift_x * sin(-_ppss.ref_yaw) + shift_y * cos(-_ppss.ref_yaw) );
+
+  return transformed_point;
+}
+
+  // Rotate back to world coord system
+vector<double>  trasnform_to_world_coords(double x, double y) {
+  vector<double> transformed_point;
+  double world_x_point = x * cos(_ppss.ref_yaw) - y * sin(_ppss.ref_yaw);
+  double world_y_point = x * sin(_ppss.ref_yaw) + y * cos(_ppss.ref_yaw);
+
+  world_x_point += _ppss.ref_x;
+  world_y_point += _ppss.ref_y;
+
+  transformed_point.push_back(world_x_point);
+  transformed_point.push_back(world_y_point);
+
+  return transformed_point;
+}
+
+
 void initState() {
+
 // Init state for this cycle
   _ppss.future_spline_points_x.clear();
   _ppss.future_spline_points_y.clear();
@@ -220,13 +256,16 @@ void initState() {
   _ppss.next_x_vals.clear();
   _ppss.next_y_vals.clear();
 
-  // Use the car as starting ref is the prev path is tiny
+  // Use the car as starting ref if the prev path is tiny
   double ref_x_prev = 0.0;
   double ref_y_prev = 0.0;
 
   if(_ppss.prev_size < 2) {
-    ref_x_prev = _ppss.ref_x - cos(_ppss.ref_yaw);
-    ref_y_prev = _ppss.ref_y - sin(_ppss.ref_yaw);
+    _ppss.ref_x = _ppss.car_x;
+    _ppss.ref_y = _ppss.car_y;
+    ref_x_prev = _ppss.car_x - cos(_ppss.car_yaw);
+    ref_y_prev = _ppss.car_y - sin(_ppss.car_yaw);
+    _ppss.ref_yaw = _ppss.car_yaw;
   }
   else {
     //Use 2 last points to get a tangent
@@ -238,33 +277,30 @@ void initState() {
     _ppss.ref_yaw = atan2(_ppss.ref_y - ref_y_prev, _ppss.ref_x - ref_x_prev);
   }
 
-  _ppss.future_spline_points_x.push_back(ref_x_prev);
-  _ppss.future_spline_points_x.push_back(_ppss.ref_x);
+  vector<double> ref_prev_car_coords = trasnform_to_car_coords(ref_x_prev, ref_y_prev);
+  vector<double> ref_car_coords = trasnform_to_car_coords(_ppss.ref_x, _ppss.ref_y);
 
-  _ppss.future_spline_points_y.push_back(ref_y_prev);
-  _ppss.future_spline_points_y.push_back(_ppss.ref_y);
+  _ppss.future_spline_points_x.push_back(ref_prev_car_coords[0]);
+  _ppss.future_spline_points_x.push_back(ref_car_coords[0]);
 
+  _ppss.future_spline_points_y.push_back(ref_prev_car_coords[1]);
+  _ppss.future_spline_points_y.push_back(ref_car_coords[1]);
 
-  // Create 3 more points ahead of the car spaced by 30m
+  // Create 3 more points ahead of the car spaced by 30m defined in initial_spline_points_spacing
   for(int i = 1; i <= 3; ++i) {
-    std::vector<double> next_point = getXY(_ppss.ref_s + i * 30,
-                                           (2 + _ppss.lane_size * 4),
+    vector<double> next_point = getXY(_ppss.car_s + i * _ppss.initial_spline_points_spacing,
+                                           (2 + _ppss.lane_size * _ppss.lane),
                                            _ppss.map_waypoints_s,
                                            _ppss.map_waypoints_x,
                                            _ppss.map_waypoints_y);
 
-    _ppss.future_spline_points_x.push_back(next_point[0]);
-    _ppss.future_spline_points_y.push_back(next_point[1]);
+    vector<double> next_point_car_coords = trasnform_to_car_coords(next_point[0], next_point[1]);
+    _ppss.future_spline_points_x.push_back( next_point_car_coords[0] );
+    _ppss.future_spline_points_y.push_back( next_point_car_coords[1] );
   }
 
-  // Rotate to car local coords
-  for(int i = 0; i < _ppss.future_spline_points_x.size(); i++) {
-    double shift_x = _ppss.future_spline_points_x[i] - _ppss.ref_x;
-    double shift_y = _ppss.future_spline_points_y[i] - _ppss.ref_y;
-
-    _ppss.future_spline_points_x[i] = (shift_x * cos(-_ppss.ref_yaw) - shift_y * sin(-_ppss.ref_yaw));
-    _ppss.future_spline_points_y[i] = (shift_x * sin(-_ppss.ref_yaw) + shift_y * cos(-_ppss.ref_yaw));
-  }
+  // Calculate the spline
+ _ppss.path_spline.set_points(_ppss.future_spline_points_x, _ppss.future_spline_points_y);
 
   // Init next vals with the remaining portion of previous path  
   for(int i = 0; i < _ppss.prev_size; i++) {
@@ -274,20 +310,28 @@ void initState() {
 }
 
 void calculatePath() {
-
   initState(); //Initialize variables and car ref for current cycle
-  // create a spline
- _ppss.path_spline.set_points(_ppss.future_spline_points_x, _ppss.future_spline_points_y);
 
- double target_x = 30.0;
+ double target_x = _ppss.target_x;
  double target_y = _ppss.path_spline(target_x);
  double target_distance = distance(target_x, target_y, 0, 0);
  double x_offset = 0.0;
 
  // Fill the rest of the path
  for(int i = 1; i <= _ppss.total_path_points - _ppss.prev_size; i++) {
-  //double steps = target_distance
+  double steps_count = target_distance / (_ppss.cycle_period * _ppss.reference_velocity / 2.24);
+  double next_x_point = x_offset + target_x / steps_count;
+  double next_y_point = _ppss.path_spline(next_x_point);
+
+  x_offset = next_x_point;
+
+  // Rotate back to world coord system
+  vector<double> world_next_point = trasnform_to_world_coords(next_x_point, next_y_point);
+
+  _ppss.next_x_vals.push_back(world_next_point[0]);
+  _ppss.next_y_vals.push_back(world_next_point[1]);
  }
+
 }
 
 int main() {
@@ -322,10 +366,10 @@ int main() {
   	iss >> d_x;
   	iss >> d_y;
     map_waypoints_x.push_back(x);
-    map_waypoints_y.push_back(x);
-    map_waypoints_s.push_back(x);
-    map_waypoints_dx.push_back(x);
-    map_waypoints_dy.push_back(x);
+    map_waypoints_y.push_back(y);
+    map_waypoints_s.push_back(s);
+    map_waypoints_dx.push_back(d_x);
+    map_waypoints_dy.push_back(d_y);
   	_ppss.map_waypoints_x.push_back(x);
   	_ppss.map_waypoints_y.push_back(y);
   	_ppss.map_waypoints_s.push_back(s);
@@ -380,6 +424,7 @@ int main() {
             _ppss.previous_path_x.clear();
             _ppss.previous_path_y.clear();
             _ppss.prev_size = previous_path_x.size();
+            _ppss.sensor_fusion.clear();
 
             for(int i = 0; i < previous_path_x.size(); ++i) {
               _ppss.previous_path_x.push_back(previous_path_x[i]);
@@ -394,10 +439,10 @@ int main() {
               _ppss.sensor_fusion.push_back(traffic_car_data);
             }
 
-            _ppss.ref_x = car_x;
-            _ppss.ref_y = car_y;
-            _ppss.ref_yaw = deg2rad(car_yaw);
-            _ppss.ref_s = car_s;
+            _ppss.car_x = car_x;
+            _ppss.car_y = car_y;
+            _ppss.car_yaw = deg2rad(car_yaw);
+            _ppss.car_s = car_s;
             calculatePath();
 
           	msgJson["next_x"] = _ppss.next_x_vals;
