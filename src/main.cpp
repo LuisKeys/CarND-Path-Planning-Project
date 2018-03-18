@@ -8,11 +8,60 @@
 #include "Eigen-3.3/Eigen/Core"
 #include "Eigen-3.3/Eigen/QR"
 #include "json.hpp"
+#include "spline.h"
 
 using namespace std;
 
 // for convenience
 using json = nlohmann::json;
+
+// System State
+struct system_state {
+
+  int total_path_points = 50;
+  int lane = 2; // car starts at slowest lane, most left lane is 0, total number of lanes is 3
+  double lane_size = 4.0; // lane width
+  double top_velocity = 50.0; // m/h (Top velocity is 50 m/h)
+  double reference_velocity = 49.5; // m/h 
+  double next_s = 0.0; // next s point for car position
+  double next_d = 0.0; // next d point for car position
+  double next_x = 0.0; // next x point for car position
+  double next_y = 0.0; // next x point for car position
+
+  // Car will be referenced from started point or from the last point of previous path
+  double ref_x = 0.0; // reference x car position
+  double ref_y = 0.0; // reference y car position
+  double ref_yaw = 0.0; // reference car angle
+  double ref_s = 0.0; // reference s car position
+
+  // Map data
+  vector<double> map_waypoints_s;
+  vector<double> map_waypoints_x;
+  vector<double> map_waypoints_y;
+  vector<double> map_waypoints_dx;
+  vector<double> map_waypoints_dy;
+
+  // Previous path
+  int prev_size = 0;
+  vector<double> previous_path_x;
+  vector<double> previous_path_y;
+
+  // Future points to create a spline
+  vector<double> future_spline_points_x;
+  vector<double> future_spline_points_y;
+
+  // Sensor fusion
+  vector<vector<double>> sensor_fusion;  
+
+  // Path spline
+  tk::spline path_spline;
+
+  // next values for path
+  vector<double> next_x_vals;
+  vector<double> next_y_vals;
+
+} _ppss; //Path Planner System State
+
 
 // For converting back and forth between radians and degrees.
 constexpr double pi() { return M_PI; }
@@ -163,15 +212,94 @@ vector<double> getXY(double s, double d, const vector<double> &maps_s, const vec
 
 }
 
+void initState() {
+// Init state for this cycle
+  _ppss.future_spline_points_x.clear();
+  _ppss.future_spline_points_y.clear();
+
+  _ppss.next_x_vals.clear();
+  _ppss.next_y_vals.clear();
+
+  // Use the car as starting ref is the prev path is tiny
+  double ref_x_prev = 0.0;
+  double ref_y_prev = 0.0;
+
+  if(_ppss.prev_size < 2) {
+    ref_x_prev = _ppss.ref_x - cos(_ppss.ref_yaw);
+    ref_y_prev = _ppss.ref_y - sin(_ppss.ref_yaw);
+  }
+  else {
+    //Use 2 last points to get a tangent
+    _ppss.ref_x = _ppss.previous_path_x[_ppss.prev_size - 1];
+    _ppss.ref_y = _ppss.previous_path_y[_ppss.prev_size - 1];
+
+    ref_x_prev = _ppss.previous_path_x[_ppss.prev_size - 2];
+    ref_y_prev = _ppss.previous_path_y[_ppss.prev_size - 2];
+    _ppss.ref_yaw = atan2(_ppss.ref_y - ref_y_prev, _ppss.ref_x - ref_x_prev);
+  }
+
+  _ppss.future_spline_points_x.push_back(ref_x_prev);
+  _ppss.future_spline_points_x.push_back(_ppss.ref_x);
+
+  _ppss.future_spline_points_y.push_back(ref_y_prev);
+  _ppss.future_spline_points_y.push_back(_ppss.ref_y);
+
+
+  // Create 3 more points ahead of the car spaced by 30m
+  for(int i = 1; i <= 3; ++i) {
+    std::vector<double> next_point = getXY(_ppss.ref_s + i * 30,
+                                           (2 + _ppss.lane_size * 4),
+                                           _ppss.map_waypoints_s,
+                                           _ppss.map_waypoints_x,
+                                           _ppss.map_waypoints_y);
+
+    _ppss.future_spline_points_x.push_back(next_point[0]);
+    _ppss.future_spline_points_y.push_back(next_point[1]);
+  }
+
+  // Rotate to car local coords
+  for(int i = 0; i < _ppss.future_spline_points_x.size(); i++) {
+    double shift_x = _ppss.future_spline_points_x[i] - _ppss.ref_x;
+    double shift_y = _ppss.future_spline_points_y[i] - _ppss.ref_y;
+
+    _ppss.future_spline_points_x[i] = (shift_x * cos(-_ppss.ref_yaw) - shift_y * sin(-_ppss.ref_yaw));
+    _ppss.future_spline_points_y[i] = (shift_x * sin(-_ppss.ref_yaw) + shift_y * cos(-_ppss.ref_yaw));
+  }
+
+  // Init next vals with the remaining portion of previous path  
+  for(int i = 0; i < _ppss.prev_size; i++) {
+  _ppss.next_x_vals.push_back(_ppss.previous_path_x[i]);
+  _ppss.next_y_vals.push_back(_ppss.previous_path_y[i]);
+  }
+}
+
+void calculatePath() {
+
+  initState(); //Initialize variables and car ref for current cycle
+  // create a spline
+ _ppss.path_spline.set_points(_ppss.future_spline_points_x, _ppss.future_spline_points_y);
+
+ double target_x = 30.0;
+ double target_y = _ppss.path_spline(target_x);
+ double target_distance = distance(target_x, target_y, 0, 0);
+ double x_offset = 0.0;
+
+ // Fill the rest of the path
+ for(int i = 1; i <= _ppss.total_path_points - _ppss.prev_size; i++) {
+  //double steps = target_distance
+ }
+}
+
 int main() {
   uWS::Hub h;
 
-  // Load up map values for waypoint's x,y,s and d normalized normal vectors
   vector<double> map_waypoints_x;
   vector<double> map_waypoints_y;
   vector<double> map_waypoints_s;
   vector<double> map_waypoints_dx;
   vector<double> map_waypoints_dy;
+
+  // Load up map values for waypoint's x,y,s and d normalized normal vectors
 
   // Waypoint map to read from
   string map_file_ = "../data/highway_map.csv";
@@ -193,11 +321,16 @@ int main() {
   	iss >> s;
   	iss >> d_x;
   	iss >> d_y;
-  	map_waypoints_x.push_back(x);
-  	map_waypoints_y.push_back(y);
-  	map_waypoints_s.push_back(s);
-  	map_waypoints_dx.push_back(d_x);
-  	map_waypoints_dy.push_back(d_y);
+    map_waypoints_x.push_back(x);
+    map_waypoints_y.push_back(x);
+    map_waypoints_s.push_back(x);
+    map_waypoints_dx.push_back(x);
+    map_waypoints_dy.push_back(x);
+  	_ppss.map_waypoints_x.push_back(x);
+  	_ppss.map_waypoints_y.push_back(y);
+  	_ppss.map_waypoints_s.push_back(s);
+  	_ppss.map_waypoints_dx.push_back(d_x);
+  	_ppss.map_waypoints_dy.push_back(d_y);
   }
 
   h.onMessage([&map_waypoints_x,&map_waypoints_y,&map_waypoints_s,&map_waypoints_dx,&map_waypoints_dy](uWS::WebSocket<uWS::SERVER> ws, char *data, size_t length,
@@ -230,6 +363,7 @@ int main() {
           	// Previous path data given to the Planner
           	auto previous_path_x = j[1]["previous_path_x"];
           	auto previous_path_y = j[1]["previous_path_y"];
+
           	// Previous path's end s and d values 
           	double end_path_s = j[1]["end_path_s"];
           	double end_path_d = j[1]["end_path_d"];
@@ -237,15 +371,37 @@ int main() {
           	// Sensor Fusion Data, a list of all other cars on the same side of the road.
           	auto sensor_fusion = j[1]["sensor_fusion"];
 
-          	json msgJson;
+            //cout << sensor_fusion << endl;
 
-          	vector<double> next_x_vals;
-          	vector<double> next_y_vals;
+          	json msgJson;
 
 
           	// TODO: define a path made up of (x,y) points that the car will visit sequentially every .02 seconds
-          	msgJson["next_x"] = next_x_vals;
-          	msgJson["next_y"] = next_y_vals;
+            _ppss.previous_path_x.clear();
+            _ppss.previous_path_y.clear();
+            _ppss.prev_size = previous_path_x.size();
+
+            for(int i = 0; i < previous_path_x.size(); ++i) {
+              _ppss.previous_path_x.push_back(previous_path_x[i]);
+              _ppss.previous_path_y.push_back(previous_path_y[i]);
+            }
+
+            for(int i = 0; i < sensor_fusion.size(); i++) {
+              vector<double> traffic_car_data;
+              for(int j = 0; j < sensor_fusion[i].size(); j++) {
+                traffic_car_data.push_back(sensor_fusion[i][j]);
+              }
+              _ppss.sensor_fusion.push_back(traffic_car_data);
+            }
+
+            _ppss.ref_x = car_x;
+            _ppss.ref_y = car_y;
+            _ppss.ref_yaw = deg2rad(car_yaw);
+            _ppss.ref_s = car_s;
+            calculatePath();
+
+          	msgJson["next_x"] = _ppss.next_x_vals;
+          	msgJson["next_y"] = _ppss.next_y_vals;
 
           	auto msg = "42[\"control\","+ msgJson.dump()+"]";
 
