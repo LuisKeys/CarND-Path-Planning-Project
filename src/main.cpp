@@ -16,6 +16,7 @@ using namespace std;
 using json = nlohmann::json;
 
 // System State
+// marker 1
 struct system_state {
 
   const int SENSOR_FUSION_ID = 0;
@@ -33,7 +34,7 @@ struct system_state {
 
   // Behaviours
   int cycle_counter = 0; //Update behaviour every 50 cyles
-  int cycles_per_bejaviour_update = 20; //Update behaviour every 50 cyles
+  int cycles_per_bejaviour_update = 5; //Update behaviour every 50 cyles
   double prev_car_distance_cost_coef = 0.010;
   double prev_car_speed_cost_coef = 0.002;
   double next_car_distance_cost_coef = 0.025;
@@ -53,14 +54,14 @@ struct system_state {
   int total_lanes = 3; // car starts at slowest lane, most left lane is 0, total number of lanes is 3
 
   // Physics
-  double safe_car_distance = 30.0; // m (Top velocity is 50 m/h)
+  double safe_car_distance = 40.0; // m (Top velocity is 50 m/h)
   double critic_car_distance = 5.0; // m (Top velocity is 50 m/h)
   double top_velocity = 49.5; // miles/h (Top velocity is 50 m/h)
   double reference_velocity = 0.0; // miles/h 
   double low_velocity_inc = 0.5; // m/s^2 
   double high_velocity_inc = 1.0; // m/s^2 
-  double next_car_distance = -1.0; // m
-  double next_car_speed = -1.0; // m/s
+  double next_car_distance = 1000000.0; // m
+  double next_car_speed = 1000000.0; // m/s
 
   double next_s = 0.0; // next s point for car position
   double next_d = 0.0; // next d point for car position
@@ -248,7 +249,6 @@ vector<double> getXY(double s, double d, const vector<double> &maps_s, const vec
 	double y = seg_y + d*sin(perp_heading);
 
 	return {x,y};
-
 }
 
 // Transform a point to local car coords
@@ -264,6 +264,7 @@ vector<double>  trasnformToCarCoords(double x, double y) {
 }
 
   // Rotate back to world coord system
+
 vector<double>  trasnformToWorldCoords(double x, double y) {
   vector<double> transformed_point;
   double world_x_point = x * cos(_ppss.ref_yaw) - y * sin(_ppss.ref_yaw);
@@ -278,9 +279,10 @@ vector<double>  trasnformToWorldCoords(double x, double y) {
   return transformed_point;
 }
 
+// marker 2
+// Init state for this cycle
 void initState() {
 
-// Init state for this cycle
   _ppss.future_spline_points_x.clear();
   _ppss.future_spline_points_y.clear();
 
@@ -318,9 +320,20 @@ void initState() {
   // Manage change lane by increments
   if(_ppss.is_changing_left_lane == 1) {
     _ppss.lane_change -= _ppss.lane_change_inc;
+      /*
+      cout << "<<<<<<<<<<<<<<<<<<<<<<<< Changing lane to the left << endl";
+      cout << "target lane:" << _ppss.target_lane << endl;
+      cout << "Change lane:" << _ppss.lane_change << endl;
+      cout << "lane:" << _ppss.lane << endl;
+      */
     cout << "Lane change:" << _ppss.lane_change << endl;
     if(_ppss.lane_change < _ppss.target_lane) {
+      /*
       cout << "Lane change complete ---------------------" << endl;
+      cout << "target lane:" << _ppss.target_lane << endl;
+      cout << "Change lane:" << _ppss.lane_change << endl;
+      cout << "lane:" << _ppss.lane << endl;
+      */
       _ppss.is_changing_left_lane = 0;
       _ppss.lane_change = _ppss.target_lane;
       _ppss.lane = _ppss.target_lane;
@@ -329,9 +342,21 @@ void initState() {
 
   if(_ppss.is_changing_right_lane == 1) {
     _ppss.lane_change += _ppss.lane_change_inc;
+      /*
+      cout << "Changing lane to the right >>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>" << endl;
+      cout << "target lane:" << _ppss.target_lane << endl;
+      cout << "Change lane:" << _ppss.lane_change << endl;
+      cout << "lane:" << _ppss.lane << endl;
+      */
+
     cout << "Lane change:" << _ppss.lane_change << endl;
     if(_ppss.lane_change > _ppss.target_lane) {
+      /*
       cout << "Lane change complete ---------------------" << endl;
+      cout << "target lane:" << _ppss.target_lane << endl;
+      cout << "Change lane:" << _ppss.lane_change << endl;
+      cout << "lane:" << _ppss.lane << endl;
+      */
       _ppss.is_changing_right_lane = 0;
       _ppss.lane_change = _ppss.target_lane;
       _ppss.lane = _ppss.target_lane;
@@ -439,7 +464,14 @@ void accelerate_soft() {
 }
 
 void de_accelerate_soft() {
-  _ppss.reference_velocity -= _ppss.low_velocity_inc * (_ppss.reference_velocity - _ppss.next_car_speed) / _ppss.reference_velocity;
+  double speed_diff = _ppss.reference_velocity - _ppss.next_car_speed;
+  double inc = _ppss.low_velocity_inc * (speed_diff) / (_ppss.reference_velocity * 3.0);
+  if(inc > _ppss.low_velocity_inc)
+    inc = _ppss.low_velocity_inc;
+  cout << "speed_diff:" << speed_diff << endl;
+  cout << "speed inc:" << inc << endl;
+
+  _ppss.reference_velocity -= inc;
   if(_ppss.reference_velocity < 0.0)
     _ppss.reference_velocity = 0.0;  
 }
@@ -472,7 +504,8 @@ void controlCurrentLane() {
     accelerate_soft();
 
   // If distance of next car in current lane is not safe then accelerate up to ref speed
-  if(_ppss.next_car_distance < _ppss.safe_car_distance && next_car_index > -1)
+  if((_ppss.next_car_distance < _ppss.safe_car_distance ||  _ppss.reference_velocity - _ppss.next_car_speed < 0)
+    && next_car_index > -1)
     if(_ppss.next_car_speed < _ppss.reference_velocity * 0.8)
       de_accelerate_soft();    
 
@@ -538,7 +571,7 @@ double evalChangeLaneCost(int target_lane) {
   double prev_car_speed_cost = prev_car_speed - _ppss.reference_velocity / _ppss.top_velocity;
   // Distance factor to next car
   double next_car_distance_cost = _ppss.safe_car_distance / next_car_distance;
-
+  /*
   cout << "vehicles_variables left:" << endl;
   cout << "prev_car_distance:" << prev_car_distance << endl;
   cout << "prev_car_speed:" << prev_car_speed << endl;
@@ -547,6 +580,7 @@ double evalChangeLaneCost(int target_lane) {
   cout << "prev_car_distance_cost:" <<_ppss.prev_car_distance_cost_coef * prev_car_distance_cost << endl;
   cout << "prev_car_speed_cost:" << _ppss.prev_car_speed_cost_coef * prev_car_speed_cost << endl;
   cout << "next_car_distance_cost:" << _ppss.next_car_distance_cost_coef * next_car_distance_cost << endl;
+  */
 
   cost = _ppss.prev_car_distance_cost_coef * prev_car_distance_cost + 
          _ppss.prev_car_speed_cost_coef * prev_car_speed_cost + 
@@ -558,14 +592,16 @@ double evalChangeLaneCost(int target_lane) {
   return cost;
 }
 
+// marker 3
 void evaluateBehaviour() {
   //Process every second - cycles_per_bejaviour_update 
   _ppss.cycle_counter++;
+  /*
+  cout << "Process is_changing_left_lane:" << _ppss.is_changing_left_lane << endl;
+  cout << "Process is_changing_right_lane:" << _ppss.is_changing_right_lane << endl;
+  */
   if(_ppss.cycle_counter > _ppss.cycles_per_bejaviour_update) {
     _ppss.cycle_counter = 0;
-    cout << "Process behaviour" << endl;
-    cout << "Process is_changing_left_lane" << _ppss.is_changing_left_lane << endl;
-    cout << "Process is_changing_right_lane" << _ppss.is_changing_right_lane << endl;
 
     // Cost functions
     // Only evaluate change of lane if it makes sense
@@ -574,25 +610,38 @@ void evaluateBehaviour() {
        _ppss.is_changing_left_lane == 0 &&
        _ppss.is_changing_right_lane == 0) {
 
+      // cout << "Process behaviour" << endl;
       // Eval left change
       double change_left_lane_cost = evalChangeLaneCost(_ppss.lane - 1);
 
-      if(change_left_lane_cost < 0.05) {
+      if(change_left_lane_cost < 0.05 && _ppss.lane > 0) {
         _ppss.is_changing_left_lane = 1;
+        _ppss.is_changing_right_lane = 0;
         _ppss.target_lane = _ppss.lane - 1;
         _ppss.lane_change = _ppss.lane;
+        /*
         cout << "<<<<<<<<<<<<<<<<<< Start change lane to the left";
+        cout << "target lane:" << _ppss.target_lane << endl;
+        cout << "Change lane:" << _ppss.lane_change << endl;
+        cout << "lane:" << _ppss.lane << endl;
+        */
         return;
       }
 
       // Eval right change
       double change_right_lane_cost = evalChangeLaneCost(_ppss.lane + 1);
 
-      if(change_right_lane_cost < 0.05)
+      if(change_right_lane_cost < 0.05 && _ppss.lane < _ppss.total_lanes - 1)
         _ppss.is_changing_right_lane = 1;
+        _ppss.is_changing_left_lane = 0;
         _ppss.target_lane = _ppss.lane + 1;
         _ppss.lane_change = _ppss.lane;
-        cout << "Start change lane to the right >>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>";
+        /*
+        cout << "Start change lane to the right >>>>>>>>>>>>>>>>>>>>>>>>>>" << endl;
+        cout << "target lane:" << _ppss.target_lane << endl;
+        cout << "Change lane:" << _ppss.lane_change << endl;
+        cout << "lane:" << _ppss.lane << endl;
+        */
     }
   }
 }
