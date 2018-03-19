@@ -18,23 +18,56 @@ using json = nlohmann::json;
 // System State
 struct system_state {
 
+  const int SENSOR_FUSION_ID = 0;
+  const int SENSOR_FUSION_X = 1;
+  const int SENSOR_FUSION_Y = 2;
+  const int SENSOR_FUSION_VX = 3;
+  const int SENSOR_FUSION_VY = 4;
+  const int SENSOR_FUSION_S = 5;
+  const int SENSOR_FUSION_D = 6;
+
+  const int NEXT_CAR_DISTANCE = 0;
+  const int NEXT_CAR_SPEED = 1;
+  const int PREV_CAR_DISTANCE = 2;
+  const int PREV_CAR_SPEED = 3;
+
+  // Behaviours
+  int cycle_counter = 0; //Update behaviour every 50 cyles
+  int cycles_per_bejaviour_update = 20; //Update behaviour every 50 cyles
+  double prev_car_distance_cost_coef = 0.010;
+  double prev_car_speed_cost_coef = 0.002;
+  double next_car_distance_cost_coef = 0.025;
+  double min_cost = 0.1;
+  int is_changing_left_lane = 0;
+  int is_changing_right_lane = 0;
+
   double target_x = 30.0;
   double initial_spline_points_spacing = 30.0;
   int total_path_points = 50;
   double cycle_period = 0.02; // car starts at slowest lane, most left lane is 0, total number of lanes is 3
   int lane = 1; // car starts at slowest lane, most left lane is 0, total number of lanes is 3
+  double lane_change = 1; // Incremental change lane
+  double lane_change_inc = 0.01; // Change lane increment
+  int target_lane = 1;
   double lane_size = 4.0; // lane width
-  double top_velocity = 50.0; // m/h (Top velocity is 50 m/h)
-  double reference_velocity = 49.5; // m/h 
+  int total_lanes = 3; // car starts at slowest lane, most left lane is 0, total number of lanes is 3
+
+  // Physics
+  double safe_car_distance = 30.0; // m (Top velocity is 50 m/h)
+  double critic_car_distance = 5.0; // m (Top velocity is 50 m/h)
+  double top_velocity = 49.5; // miles/h (Top velocity is 50 m/h)
+  double reference_velocity = 0.0; // miles/h 
+  double low_velocity_inc = 0.5; // m/s^2 
+  double high_velocity_inc = 1.0; // m/s^2 
+  double next_car_distance = -1.0; // m
+  double next_car_speed = -1.0; // m/s
+
   double next_s = 0.0; // next s point for car position
   double next_d = 0.0; // next d point for car position
   double next_x = 0.0; // next x point for car position
   double next_y = 0.0; // next x point for car position
 
   // Car will be referenced from started point or from the last point of previous path
-  double car_x = 0.0; // reference x car position
-  double car_y = 0.0; // reference y car position
-  double car_yaw = 0.0; // reference car angle
   double car_s = 0.0; // reference s car position
   double ref_x = 0.0; // reference x car position
   double ref_y = 0.0; // reference y car position
@@ -65,7 +98,6 @@ struct system_state {
   // next values for path
   vector<double> next_x_vals;
   vector<double> next_y_vals;
-
 } _ppss; //Path Planner System State
 
 
@@ -220,7 +252,7 @@ vector<double> getXY(double s, double d, const vector<double> &maps_s, const vec
 }
 
 // Transform a point to local car coords
-vector<double>  trasnform_to_car_coords(double x, double y) {
+vector<double>  trasnformToCarCoords(double x, double y) {
   vector<double> transformed_point;
   double shift_x = x - _ppss.ref_x;
   double shift_y = y - _ppss.ref_y;
@@ -232,7 +264,7 @@ vector<double>  trasnform_to_car_coords(double x, double y) {
 }
 
   // Rotate back to world coord system
-vector<double>  trasnform_to_world_coords(double x, double y) {
+vector<double>  trasnformToWorldCoords(double x, double y) {
   vector<double> transformed_point;
   double world_x_point = x * cos(_ppss.ref_yaw) - y * sin(_ppss.ref_yaw);
   double world_y_point = x * sin(_ppss.ref_yaw) + y * cos(_ppss.ref_yaw);
@@ -245,7 +277,6 @@ vector<double>  trasnform_to_world_coords(double x, double y) {
 
   return transformed_point;
 }
-
 
 void initState() {
 
@@ -261,11 +292,8 @@ void initState() {
   double ref_y_prev = 0.0;
 
   if(_ppss.prev_size < 2) {
-    _ppss.ref_x = _ppss.car_x;
-    _ppss.ref_y = _ppss.car_y;
-    ref_x_prev = _ppss.car_x - cos(_ppss.car_yaw);
-    ref_y_prev = _ppss.car_y - sin(_ppss.car_yaw);
-    _ppss.ref_yaw = _ppss.car_yaw;
+    ref_x_prev = _ppss.ref_x - cos(_ppss.ref_yaw);
+    ref_y_prev = _ppss.ref_y - sin(_ppss.ref_yaw);
   }
   else {
     //Use 2 last points to get a tangent
@@ -277,8 +305,8 @@ void initState() {
     _ppss.ref_yaw = atan2(_ppss.ref_y - ref_y_prev, _ppss.ref_x - ref_x_prev);
   }
 
-  vector<double> ref_prev_car_coords = trasnform_to_car_coords(ref_x_prev, ref_y_prev);
-  vector<double> ref_car_coords = trasnform_to_car_coords(_ppss.ref_x, _ppss.ref_y);
+  vector<double> ref_prev_car_coords = trasnformToCarCoords(ref_x_prev, ref_y_prev);
+  vector<double> ref_car_coords = trasnformToCarCoords(_ppss.ref_x, _ppss.ref_y);
 
   _ppss.future_spline_points_x.push_back(ref_prev_car_coords[0]);
   _ppss.future_spline_points_x.push_back(ref_car_coords[0]);
@@ -287,14 +315,37 @@ void initState() {
   _ppss.future_spline_points_y.push_back(ref_car_coords[1]);
 
   // Create 3 more points ahead of the car spaced by 30m defined in initial_spline_points_spacing
+  // Manage change lane by increments
+  if(_ppss.is_changing_left_lane == 1) {
+    _ppss.lane_change -= _ppss.lane_change_inc;
+    cout << "Lane change:" << _ppss.lane_change << endl;
+    if(_ppss.lane_change < _ppss.target_lane) {
+      cout << "Lane change complete ---------------------" << endl;
+      _ppss.is_changing_left_lane = 0;
+      _ppss.lane_change = _ppss.target_lane;
+      _ppss.lane = _ppss.target_lane;
+    }
+  }
+
+  if(_ppss.is_changing_right_lane == 1) {
+    _ppss.lane_change += _ppss.lane_change_inc;
+    cout << "Lane change:" << _ppss.lane_change << endl;
+    if(_ppss.lane_change > _ppss.target_lane) {
+      cout << "Lane change complete ---------------------" << endl;
+      _ppss.is_changing_right_lane = 0;
+      _ppss.lane_change = _ppss.target_lane;
+      _ppss.lane = _ppss.target_lane;
+    }
+  }
+
   for(int i = 1; i <= 3; ++i) {
     vector<double> next_point = getXY(_ppss.car_s + i * _ppss.initial_spline_points_spacing,
-                                           (2 + _ppss.lane_size * _ppss.lane),
+                                           (2 + _ppss.lane_size * _ppss.lane_change),
                                            _ppss.map_waypoints_s,
                                            _ppss.map_waypoints_x,
                                            _ppss.map_waypoints_y);
 
-    vector<double> next_point_car_coords = trasnform_to_car_coords(next_point[0], next_point[1]);
+    vector<double> next_point_car_coords = trasnformToCarCoords(next_point[0], next_point[1]);
     _ppss.future_spline_points_x.push_back( next_point_car_coords[0] );
     _ppss.future_spline_points_y.push_back( next_point_car_coords[1] );
   }
@@ -309,7 +360,55 @@ void initState() {
   }
 }
 
-void calculatePath() {
+bool isWithinLane(double d, int lane) {
+  double half_lane = _ppss.lane_size / 2.0;
+  double lane_size = _ppss.lane_size;
+
+  return d < (half_lane + lane_size * lane + half_lane) && d > (lane_size * lane);
+}
+
+int getNextCarIndexInLaneDistance(int lane) {
+  double min_distance = 1000000.0;
+  double min_i = -1;
+  for(int i = 0; i < _ppss.sensor_fusion.size(); i++) {
+    // Check car in the same lane
+    double d = _ppss.sensor_fusion[i][_ppss.SENSOR_FUSION_D];
+    if(isWithinLane(d, lane)){
+      double s_dist = _ppss.sensor_fusion[i][_ppss.SENSOR_FUSION_S] - _ppss.car_s;      
+      if(s_dist > 0) { //Only consider positive distances for car ahead
+        if(s_dist < min_distance) {
+          min_distance = s_dist;
+          min_i = i;
+        }
+      }
+    }
+  }
+
+  return min_i;
+}
+
+int getPreviousCarIndexInLaneDistance(int lane) {
+  double min_distance = 1000000.0;
+  double min_i = -1;
+  for(int i = 0; i < _ppss.sensor_fusion.size(); i++) {
+    // Check car in the same lane
+    double d = _ppss.sensor_fusion[i][_ppss.SENSOR_FUSION_D];
+    if(isWithinLane(d, lane)){
+      double s_dist = _ppss.car_s - _ppss.sensor_fusion[i][_ppss.SENSOR_FUSION_S];
+      if(s_dist > 0) { //Only consider negative distances for car behind
+        if(s_dist < min_distance) {
+          min_distance = s_dist;
+          min_i = i;
+        }
+      }
+    }
+  }
+
+  return min_i;
+}
+
+// Calculate geometric next points based in speed reference and selected lane
+void calculateNextPoints() {
   initState(); //Initialize variables and car ref for current cycle
 
  double target_x = _ppss.target_x;
@@ -326,12 +425,184 @@ void calculatePath() {
   x_offset = next_x_point;
 
   // Rotate back to world coord system
-  vector<double> world_next_point = trasnform_to_world_coords(next_x_point, next_y_point);
+  vector<double> world_next_point = trasnformToWorldCoords(next_x_point, next_y_point);
 
   _ppss.next_x_vals.push_back(world_next_point[0]);
   _ppss.next_y_vals.push_back(world_next_point[1]);
  }
+}
 
+void accelerate_soft() {
+  _ppss.reference_velocity += _ppss.low_velocity_inc;
+  if(_ppss.reference_velocity > _ppss.top_velocity)
+    _ppss.reference_velocity = _ppss.top_velocity;  
+}
+
+void de_accelerate_soft() {
+  _ppss.reference_velocity -= _ppss.low_velocity_inc * (_ppss.reference_velocity - _ppss.next_car_speed) / _ppss.reference_velocity;
+  if(_ppss.reference_velocity < 0.0)
+    _ppss.reference_velocity = 0.0;  
+}
+
+void de_accelerate_hard() {
+  _ppss.reference_velocity -= _ppss.high_velocity_inc;
+  if(_ppss.reference_velocity < 0.0)
+    _ppss.reference_velocity = 0.0;  
+}
+
+void accelerate_hard() {
+  _ppss.reference_velocity += _ppss.high_velocity_inc;
+  if(_ppss.reference_velocity > _ppss.top_velocity)
+    _ppss.reference_velocity = _ppss.top_velocity;  
+}
+
+void controlCurrentLane() {
+  int next_car_index = getNextCarIndexInLaneDistance(_ppss.lane);
+  _ppss.next_car_distance = -1.0;
+  _ppss.next_car_speed = -1.0;
+  if(next_car_index > -1) {
+    _ppss.next_car_distance = _ppss.sensor_fusion[next_car_index][_ppss.SENSOR_FUSION_S] - _ppss.car_s;
+    double vx = _ppss.sensor_fusion[next_car_index][_ppss.SENSOR_FUSION_VX];
+    double vy = _ppss.sensor_fusion[next_car_index][_ppss.SENSOR_FUSION_VY];    
+    _ppss.next_car_speed = distance(vx, vy, 0, 0);
+  }
+
+  // If distance of next car in current lane is safe then accelerate up to ref speed
+  if(_ppss.next_car_distance > _ppss.safe_car_distance || next_car_index == -1)
+    accelerate_soft();
+
+  // If distance of next car in current lane is not safe then accelerate up to ref speed
+  if(_ppss.next_car_distance < _ppss.safe_car_distance && next_car_index > -1)
+    if(_ppss.next_car_speed < _ppss.reference_velocity * 0.8)
+      de_accelerate_soft();    
+
+  // If distance of next car in current lane is not safe then accelerate up to ref speed
+  if(_ppss.next_car_distance < _ppss.critic_car_distance && next_car_index > -1)
+      de_accelerate_soft();    
+}
+
+vector<double> evalVehiclesInTargetLane(int target_lane) {
+  // Eval distance and speed of cars in the target lane
+  vector<double> vehicles_variables;
+  int next_car_index = getNextCarIndexInLaneDistance(target_lane);
+  double next_car_distance = 1000000.0;
+  double next_car_speed = 0.0;
+  if(next_car_index > -1) {
+    next_car_distance = _ppss.sensor_fusion[next_car_index][_ppss.SENSOR_FUSION_S] - _ppss.car_s;
+    double vx = _ppss.sensor_fusion[next_car_index][_ppss.SENSOR_FUSION_VX];
+    double vy = _ppss.sensor_fusion[next_car_index][_ppss.SENSOR_FUSION_VY];    
+    next_car_speed = distance(vx, vy, 0, 0);
+  }
+
+  int previous_car_index = getPreviousCarIndexInLaneDistance(target_lane);
+  double previous_car_distance = -1000000.0;
+  double previous_car_speed = 0.0;
+  if(previous_car_index > -1) {
+    previous_car_distance = _ppss.car_s - _ppss.sensor_fusion[previous_car_index][_ppss.SENSOR_FUSION_S];
+    double vx = _ppss.sensor_fusion[previous_car_index][_ppss.SENSOR_FUSION_VX];
+    double vy = _ppss.sensor_fusion[previous_car_index][_ppss.SENSOR_FUSION_VY];    
+    previous_car_speed = distance(vx, vy, 0, 0);
+  }  
+
+  vehicles_variables.push_back(next_car_distance);
+  vehicles_variables.push_back(next_car_speed);
+  vehicles_variables.push_back(previous_car_distance);
+  vehicles_variables.push_back(previous_car_speed);
+
+  return vehicles_variables;
+}
+
+double evalChangeLaneCost(int target_lane) {
+  double cost = 1.0;
+
+  // Already in the most left lane, return highest cost
+  if(_ppss.lane == 0) {
+    return cost;
+  }
+
+  vector<double> vehicles_variables = evalVehiclesInTargetLane(target_lane);
+  double prev_car_distance = vehicles_variables[_ppss.PREV_CAR_DISTANCE];
+  double prev_car_speed = vehicles_variables[_ppss.PREV_CAR_SPEED];
+  double next_car_distance = vehicles_variables[_ppss.NEXT_CAR_DISTANCE];
+  double next_car_speed = vehicles_variables[_ppss.NEXT_CAR_SPEED];
+
+  // Next car goes slower than current next car, no sense to change lane
+  if(next_car_speed < _ppss.next_car_speed * 0.8 && next_car_distance < _ppss.safe_car_distance * 2.0) {
+    return 1.0;
+  }
+
+  // Evaluate change of lane is not risky with a set of cost functions
+  // Distance factor of prev car
+  double prev_car_distance_cost = _ppss.safe_car_distance / prev_car_distance;
+  // Speed difference of prev car
+  double prev_car_speed_cost = prev_car_speed - _ppss.reference_velocity / _ppss.top_velocity;
+  // Distance factor to next car
+  double next_car_distance_cost = _ppss.safe_car_distance / next_car_distance;
+
+  cout << "vehicles_variables left:" << endl;
+  cout << "prev_car_distance:" << prev_car_distance << endl;
+  cout << "prev_car_speed:" << prev_car_speed << endl;
+  cout << "next_car_distance:" << next_car_distance << endl;
+
+  cout << "prev_car_distance_cost:" <<_ppss.prev_car_distance_cost_coef * prev_car_distance_cost << endl;
+  cout << "prev_car_speed_cost:" << _ppss.prev_car_speed_cost_coef * prev_car_speed_cost << endl;
+  cout << "next_car_distance_cost:" << _ppss.next_car_distance_cost_coef * next_car_distance_cost << endl;
+
+  cost = _ppss.prev_car_distance_cost_coef * prev_car_distance_cost + 
+         _ppss.prev_car_speed_cost_coef * prev_car_speed_cost + 
+         _ppss.next_car_distance_cost_coef * next_car_distance_cost;
+
+  if(cost > 1.0) cost = 1.0;
+  if(cost < 0.0) cost = 0.0;
+
+  return cost;
+}
+
+void evaluateBehaviour() {
+  //Process every second - cycles_per_bejaviour_update 
+  _ppss.cycle_counter++;
+  if(_ppss.cycle_counter > _ppss.cycles_per_bejaviour_update) {
+    _ppss.cycle_counter = 0;
+    cout << "Process behaviour" << endl;
+    cout << "Process is_changing_left_lane" << _ppss.is_changing_left_lane << endl;
+    cout << "Process is_changing_right_lane" << _ppss.is_changing_right_lane << endl;
+
+    // Cost functions
+    // Only evaluate change of lane if it makes sense
+    if(_ppss.next_car_speed < _ppss.top_velocity * 0.8 && 
+       _ppss.next_car_distance < _ppss.safe_car_distance &&
+       _ppss.is_changing_left_lane == 0 &&
+       _ppss.is_changing_right_lane == 0) {
+
+      // Eval left change
+      double change_left_lane_cost = evalChangeLaneCost(_ppss.lane - 1);
+
+      if(change_left_lane_cost < 0.05) {
+        _ppss.is_changing_left_lane = 1;
+        _ppss.target_lane = _ppss.lane - 1;
+        _ppss.lane_change = _ppss.lane;
+        cout << "<<<<<<<<<<<<<<<<<< Start change lane to the left";
+        return;
+      }
+
+      // Eval right change
+      double change_right_lane_cost = evalChangeLaneCost(_ppss.lane + 1);
+
+      if(change_right_lane_cost < 0.05)
+        _ppss.is_changing_right_lane = 1;
+        _ppss.target_lane = _ppss.lane + 1;
+        _ppss.lane_change = _ppss.lane;
+        cout << "Start change lane to the right >>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>";
+    }
+  }
+}
+
+// Planner entry point
+void calculatePath() {
+  initState(); // Initialize variables and car ref for current cycle
+  evaluateBehaviour(); // Select speed and lane based on cost functions  
+  controlCurrentLane(); // Get next car and keep a safe distance while in current lane
+  calculateNextPoints(); // Geometric calculation of path based on lane and ref speed
 }
 
 int main() {
@@ -419,8 +690,9 @@ int main() {
 
           	json msgJson;
 
-
           	// TODO: define a path made up of (x,y) points that the car will visit sequentially every .02 seconds
+
+            // Init state to load local prev path and sensor values
             _ppss.previous_path_x.clear();
             _ppss.previous_path_y.clear();
             _ppss.prev_size = previous_path_x.size();
@@ -439,10 +711,13 @@ int main() {
               _ppss.sensor_fusion.push_back(traffic_car_data);
             }
 
-            _ppss.car_x = car_x;
-            _ppss.car_y = car_y;
-            _ppss.car_yaw = deg2rad(car_yaw);
+            // Load car state to system state
+            _ppss.ref_x = car_x;
+            _ppss.ref_y = car_y;
+            _ppss.ref_yaw = deg2rad(car_yaw);
             _ppss.car_s = car_s;
+
+            // Main planner entry point
             calculatePath();
 
           	msgJson["next_x"] = _ppss.next_x_vals;
