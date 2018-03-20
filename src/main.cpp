@@ -36,9 +36,10 @@ struct system_state {
   int cycle_counter = 0; //Update behaviour every 50 cyles
   int cycles_per_bejaviour_update = 10; //Update behaviour every 50 cyles
   double prev_car_distance_cost_coef = 0.010;
-  double prev_car_speed_cost_coef = 0.001;
+  double prev_car_speed_cost_coef = 0.06;
   double next_car_distance_cost_coef = 0.025;
-  double min_cost = 0.2;
+  double next_car_speed_cost_coef = 0.06;  
+  double min_cost = 0.3;
   int is_changing_left_lane = 0;
   int is_changing_right_lane = 0;
 
@@ -76,7 +77,7 @@ struct system_state {
   double ref_y = 0.0; // reference y car position
   double ref_yaw = 0.0; // reference car angle
 
-  // Map data
+    // Map data
   vector<double> map_waypoints_s;
   vector<double> map_waypoints_x;
   vector<double> map_waypoints_y;
@@ -439,8 +440,6 @@ int getPreviousCarIndexInLaneDistance(int lane) {
 
 // Calculate geometric next points based in speed reference and selected lane
 void calculateNextPoints() {
-  initState(); //Initialize variables and car ref for current cycle
-
  double target_x = _ppss.target_x;
  double target_y = 0;
  double x_offset = 0.0;
@@ -502,6 +501,7 @@ void controlCurrentLane() {
   int next_car_index = getNextCarIndexInLaneDistance(_ppss.lane);
   _ppss.next_car_distance = -1.0;
   _ppss.next_car_speed = -1.0;
+
   if(next_car_index > -1) {
     _ppss.next_car_distance = _ppss.sensor_fusion[next_car_index][_ppss.SENSOR_FUSION_S] - _ppss.car_s;
     double vx = _ppss.sensor_fusion[next_car_index][_ppss.SENSOR_FUSION_VX];
@@ -578,11 +578,14 @@ double evalChangeLaneCost(int target_lane) {
 
   // Evaluate change of lane is not risky with a set of cost functions
   // Distance factor of prev car
-  double prev_car_distance_cost = _ppss.safe_car_distance / prev_car_distance;
+  double prev_car_distance_cost = fabs(_ppss.safe_car_distance / prev_car_distance);
   // Speed difference of prev car
-  double prev_car_speed_cost = prev_car_speed - _ppss.reference_velocity / _ppss.top_velocity;
+  double prev_car_speed_cost = fabs(prev_car_speed - _ppss.reference_velocity) / _ppss.top_velocity;
   // Distance factor to next car
-  double next_car_distance_cost = _ppss.safe_car_distance / next_car_distance;
+  double next_car_distance_cost = fabs(_ppss.safe_car_distance / next_car_distance);
+  // Speed factor to next car
+  double next_car_speed_cost = fabs(next_car_speed - _ppss.reference_velocity) / _ppss.top_velocity;
+
   cout << "vehicles_variables left:" << endl;
   cout << "prev_car_distance:" << prev_car_distance << endl;
   cout << "prev_car_speed:" << prev_car_speed << endl;
@@ -592,10 +595,12 @@ double evalChangeLaneCost(int target_lane) {
   cout << "prev_car_distance_cost:" <<_ppss.prev_car_distance_cost_coef * prev_car_distance_cost << endl;
   cout << "prev_car_speed_cost:" << _ppss.prev_car_speed_cost_coef * prev_car_speed_cost << endl;
   cout << "next_car_distance_cost:" << _ppss.next_car_distance_cost_coef * next_car_distance_cost << endl;
+  cout << "next_car_speed_cost_coef:" << _ppss.next_car_speed_cost_coef * next_car_speed_cost << endl;
 
   cost = _ppss.prev_car_distance_cost_coef * prev_car_distance_cost + 
          _ppss.prev_car_speed_cost_coef * prev_car_speed_cost + 
-         _ppss.next_car_distance_cost_coef * next_car_distance_cost;
+         _ppss.next_car_distance_cost_coef * next_car_distance_cost + 
+         _ppss.next_car_speed_cost_coef * next_car_speed_cost;
 
   cout << "Cost fresh:" << endl; 
   cout << cost << endl; 
@@ -639,8 +644,18 @@ void evaluateBehaviour() {
   cout << "Process is_changing_left_lane:" << _ppss.is_changing_left_lane << endl;
   cout << "Process is_changing_right_lane:" << _ppss.is_changing_right_lane << endl;
   */
+
   if(_ppss.cycle_counter > _ppss.cycles_per_bejaviour_update) {
     _ppss.cycle_counter = 0;
+
+    cout << "_ppss.next_car_distance:" << endl; 
+    cout << _ppss.next_car_distance << endl; 
+    cout << "_ppss.safe_car_distance * 2.0:" << endl; 
+    cout << _ppss.safe_car_distance * 2.0 << endl;
+    cout << "_ppss.is_changing_left_lane:" << endl; 
+    cout << _ppss.is_changing_left_lane << endl;
+    cout << "_ppss.is_changing_right_lane:" << endl; 
+    cout << _ppss.is_changing_right_lane << endl;    
 
     // Cost functions
     // Only evaluate change of lane if it makes sense
@@ -651,36 +666,42 @@ void evaluateBehaviour() {
       // cout << "Process behaviour" << endl;
       // Eval left change
       double change_left_lane_cost = evalChangeLaneCost(_ppss.lane - 1);
+      cout << "change_left_lane_cost:" << endl; 
+      cout << change_left_lane_cost << endl;
 
-      if(change_left_lane_cost < 0.05 && _ppss.lane > 0) {
+      if(change_left_lane_cost < _ppss.min_cost && _ppss.lane > 0) {
         _ppss.is_changing_left_lane = 1;
         _ppss.is_changing_right_lane = 0;
         _ppss.target_lane = _ppss.lane - 1;
         _ppss.lane_change = _ppss.lane;
-        /*
+        cout << "\033[2J\033[1;1H";
         cout << "<<<<<<<<<<<<<<<<<< Start change lane to the left";
         cout << "target lane:" << _ppss.target_lane << endl;
         cout << "Change lane:" << _ppss.lane_change << endl;
         cout << "lane:" << _ppss.lane << endl;
-        */
+        cout << "change_left_lane_cost:" << change_left_lane_cost << endl;
+        cout << "_ppss.min_cost:" << _ppss.min_cost << endl;
         return;
       }
 
       // Eval right change
       double change_right_lane_cost = evalChangeLaneCost(_ppss.lane + 1);
+      cout << "change_right_lane_cost:" << endl; 
+      cout << change_right_lane_cost << endl;
 
-      if(change_right_lane_cost < 0.05 && _ppss.lane < _ppss.total_lanes - 1)
+      if(change_right_lane_cost < _ppss.min_cost && _ppss.lane < _ppss.total_lanes - 1)
         _ppss.is_changing_right_lane = 1;
         _ppss.is_changing_left_lane = 0;
         _ppss.target_lane = _ppss.lane + 1;
         _ppss.lane_change = _ppss.lane;
-        /*
+        cout << "\033[2J\033[1;1H";
         cout << "Start change lane to the right >>>>>>>>>>>>>>>>>>>>>>>>>>" << endl;
         cout << "target lane:" << _ppss.target_lane << endl;
         cout << "Change lane:" << _ppss.lane_change << endl;
         cout << "lane:" << _ppss.lane << endl;
-        */
-    }
+        cout << "change_right_lane_cost:" << change_right_lane_cost << endl;
+        cout << "_ppss.min_cost:" << _ppss.min_cost << endl;
+      }
   }
 }
 
@@ -805,6 +826,7 @@ int main() {
             _ppss.car_s = car_s;
 
             // Main planner entry point
+            cout << "\033[2J\033[1;1H";
             calculatePath();
 
           	msgJson["next_x"] = _ppss.next_x_vals;
