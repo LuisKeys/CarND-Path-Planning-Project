@@ -499,7 +499,7 @@ void accelerate_hard() {
 
 void controlCurrentLane() {
   int next_car_index = getNextCarIndexInLaneDistance(_ppss.lane);
-  _ppss.next_car_distance = -1.0;
+  _ppss.next_car_distance = 1000000.0;
   _ppss.next_car_speed = -1.0;
 
   if(next_car_index > -1) {
